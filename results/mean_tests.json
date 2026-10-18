@@ -1,0 +1,107 @@
+{
+  "method": "OPT-FFT",
+  "prior_names": [
+    "CO96",
+    "R70"
+  ],
+  "distribution": "Bernoulli",
+  "mu0": 0.5,
+  "alpha": 0.05,
+  "horizon": 10000,
+  "trials": 100,
+  "gaps": [
+    0.2,
+    0.1,
+    0.05,
+    0.025
+  ],
+  "seed": 2026,
+  "prior_weights": [
+    0.5,
+    0.5
+  ],
+  "moment_setup_seconds": 1.6968991949688643,
+  "trace_statistic": "sample mean of log wealth over all trials at each time, continuing after rejection",
+  "trace_uncertainty": "pointwise standard error across trials; zero placeholder for a single trial",
+  "time_statistic": "sample mean of min(stopping time, horizon); unrejected trials are censored",
+  "environment": {
+    "python": "3.12.2",
+    "numpy": "2.2.4",
+    "scipy": "1.15.3",
+    "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43"
+  },
+  "scenarios": [
+    {
+      "true_mean": 0.7,
+      "gap": 0.2,
+      "side": "above",
+      "rejections": 100,
+      "trials": 100,
+      "rejection_rate": 1.0,
+      "censored_trials": 0,
+      "mean_capped_time": 60.29,
+      "se_capped_time": 3.652100405757949,
+      "trace_file": "trace_gap_0.2_above.csv",
+      "test_seconds": 6.965265718987212,
+      "clipped_allocations_in_full_traces": 0,
+      "validation": {
+        "observations": 256,
+        "max_log_wealth_error": 2.6290081223123707e-13
+      }
+    },
+    {
+      "true_mean": 0.6,
+      "gap": 0.1,
+      "side": "above",
+      "rejections": 100,
+      "trials": 100,
+      "rejection_rate": 1.0,
+      "censored_trials": 0,
+      "mean_capped_time": 313.79,
+      "se_capped_time": 18.86818333661835,
+      "trace_file": "trace_gap_0.1_above.csv",
+      "test_seconds": 6.836351530975662,
+      "clipped_allocations_in_full_traces": 0,
+      "validation": {
+        "observations": 256,
+        "max_log_wealth_error": 6.661338147750939e-14
+      }
+    },
+    {
+      "true_mean": 0.55,
+      "gap": 0.05,
+      "side": "above",
+      "rejections": 100,
+      "trials": 100,
+      "rejection_rate": 1.0,
+      "censored_trials": 0,
+      "mean_capped_time": 1182.08,
+      "se_capped_time": 76.94217910387336,
+      "trace_file": "trace_gap_0.05_above.csv",
+      "test_seconds": 6.835021633014549,
+      "clipped_allocations_in_full_traces": 0,
+      "validation": {
+        "observations": 256,
+        "max_log_wealth_error": 1.554312234475219e-14
+      }
+    },
+    {
+      "true_mean": 0.525,
+      "gap": 0.025,
+      "side": "above",
+      "rejections": 92,
+      "trials": 100,
+      "rejection_rate": 0.92,
+      "censored_trials": 8,
+      "mean_capped_time": 4714.16,
+      "se_capped_time": 289.86131540041106,
+      "trace_file": "trace_gap_0.025_above.csv",
+      "test_seconds": 6.847444999963045,
+      "clipped_allocations_in_full_traces": 0,
+      "validation": {
+        "observations": 256,
+        "max_log_wealth_error": 7.882583474838611e-15
+      }
+    }
+  ]
+}
