@@ -1,19 +1,24 @@
 # OPT-FFT
 
-**Optimal Portfolio Testing with Fast Fourier Transforms**: testing by betting
-with F-weighted portfolios.
+**Optimal Portfolio Testing with Fast Fourier Transforms**
 
-Test whether independent observations in `[0, 1]` have mean `mu0`, against
-the two-sided alternative that the mean differs from `mu0`. The test uses a
-50/50 mixture of the CO96 and R70 priors and rejects when betting wealth first
-reaches `1 / alpha`.
+Test whether independent observations in `[0, 1]` have mean `mu0`, against the two-sided alternative that the mean differs from `mu0`. The test uses a 50/50 mixture of the CO96 and R70 priors and rejects when betting wealth first reaches `1 / alpha`, as described in Remark 2 of Orabona and Jun (IEEE Trans. Information Theory, 2024).
+Here, we denote by
 
-The prior labels follow Orabona and Jun (2024):
+- **CO96**: the `Beta(1/2, 1/2)` prior on the two-stock portfolio allocation analyzed by Cover and Ordentlich (1996).
+- **R70**: the prior proposed by Robbins (1970), adapted by Orabona and Jun (2024) to betting fractions in `[-1, 1]`.
 
-- **CO96**: Cover and Ordentlich (1996), who analyzed the `Beta(1/2, 1/2)`
-  prior on the two-stock portfolio allocation.
-- **R70**: Robbins (1970), whose prior is adapted by Orabona and Jun to
-  betting fractions in `[-1, 1]`.
+OPT-FFT uses a Fast Fourier Transform to evaluate the portfolio algorithm exactly in O(T ln^2 T) time.
+
+The algorithm and motivation are described in 
+
+@article{orabon2026optimal,
+  title={Optimal Priors for Betting Tests with Bounded Payoffs: An Exact Efficiency Characterization},
+  author={Orabona, Francesco},
+  journal={arXiv preprint arXiv:2610.25821},
+  year={2026}
+}
+
 
 ## Installation
 
@@ -88,7 +93,7 @@ with shading of ±1 standard error. The display ends 10% above the individual
 test's log rejection threshold; saved traces cover the full horizon. Crossing
 the threshold with the average curve is not a test decision.
 
-Stopping-time averages count trials that have not rejected by the horizon as
+Stopping-time averages count trials that have not been rejected by the horizon as
 having reached the horizon. They therefore summarize capped stopping times.
 
 ![OPT-FFT mean tests with decreasing gaps](results/mean_tests.png)
@@ -97,5 +102,5 @@ having reached the horizon. They therefore summarize capped stopping times.
 [Detailed results](results/mean_tests.json) · [PDF figure](results/mean_tests.pdf)
 
 Each scenario also saves `trace_gap_<gap>_above.csv`, with columns
-`n,mean_log_wealth,se_log_wealth,trials`. With one trial, shading is omitted and
+`n,mean_log_wealth,se_log_wealth,trials`. With one trial, shading is omitted, and
 the standard-error column is zero. All outputs are in [results/](results/).
