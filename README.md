@@ -12,12 +12,14 @@ OPT-FFT uses a Fast Fourier Transform to evaluate the portfolio algorithm exactl
 
 The algorithm and motivation are described in 
 
+```
 @article{orabon2026optimal,
   title={Optimal Priors for Betting Tests with Bounded Payoffs: An Exact Efficiency Characterization},
   author={Orabona, Francesco},
   journal={arXiv preprint arXiv:2610.25821},
   year={2026}
 }
+```
 
 
 ## Installation
