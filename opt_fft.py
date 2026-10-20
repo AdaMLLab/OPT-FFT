@@ -1,6 +1,6 @@
 """OPT-FFT: Optimal Portfolio Testing with Fast Fourier Transforms.
 
-Test a specified bounded mean using the 50/50 CO96/R70 hedge.
+Test a specified bounded mean using the 50/50 CO96/R70 hedge, as in Remark 2 in Orabona and Jun (2024).
 
 CO96 denotes the Beta(1/2, 1/2) portfolio prior analyzed by Cover and Ordentlich
 (1996). R70 denotes the Robbins (1970) prior adapted by Orabona and Jun (2024)
@@ -8,7 +8,15 @@ to betting fractions in [-1, 1].
 
 The one-dimensional Prefix algorithm uses fast Fourier transforms (FFTs)
 to compute cosine transforms.
-See the manuscript for the priors, numerical qualifications, and complexity.
+See the paper for the priors, numerical qualifications, and complexity:
+
+@article{orabon2026optimal,
+  title={Optimal Priors for Betting Tests with Bounded Payoffs: An Exact Efficiency Characterization},
+  author={Orabona, Francesco},
+  journal={arXiv preprint arXiv:2610.25821},
+  year={2026}
+}
+
 """
 
 from __future__ import annotations
