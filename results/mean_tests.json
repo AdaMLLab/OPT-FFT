@@ -20,7 +20,7 @@
     0.5,
     0.5
   ],
-  "moment_setup_seconds": 1.6968991949688643,
+  "moment_setup_seconds": 0.03861050901468843,
   "trace_statistic": "sample mean of log wealth over all trials at each time, continuing after rejection",
   "trace_uncertainty": "pointwise standard error across trials; zero placeholder for a single trial",
   "time_statistic": "sample mean of min(stopping time, horizon); unrejected trials are censored",
@@ -42,11 +42,11 @@
       "mean_capped_time": 60.29,
       "se_capped_time": 3.652100405757949,
       "trace_file": "trace_gap_0.2_above.csv",
-      "test_seconds": 6.965265718987212,
+      "test_seconds": 6.943489183031488,
       "clipped_allocations_in_full_traces": 0,
       "validation": {
         "observations": 256,
-        "max_log_wealth_error": 2.6290081223123707e-13
+        "max_log_wealth_error": 3.907985046680551e-14
       }
     },
     {
@@ -60,11 +60,11 @@
       "mean_capped_time": 313.79,
       "se_capped_time": 18.86818333661835,
       "trace_file": "trace_gap_0.1_above.csv",
-      "test_seconds": 6.836351530975662,
+      "test_seconds": 6.878863709978759,
       "clipped_allocations_in_full_traces": 0,
       "validation": {
         "observations": 256,
-        "max_log_wealth_error": 6.661338147750939e-14
+        "max_log_wealth_error": 1.554312234475219e-14
       }
     },
     {
@@ -78,11 +78,11 @@
       "mean_capped_time": 1182.08,
       "se_capped_time": 76.94217910387336,
       "trace_file": "trace_gap_0.05_above.csv",
-      "test_seconds": 6.835021633014549,
+      "test_seconds": 6.891724282002542,
       "clipped_allocations_in_full_traces": 0,
       "validation": {
         "observations": 256,
-        "max_log_wealth_error": 1.554312234475219e-14
+        "max_log_wealth_error": 4.218847493575595e-15
       }
     },
     {
@@ -96,11 +96,11 @@
       "mean_capped_time": 4714.16,
       "se_capped_time": 289.86131540041106,
       "trace_file": "trace_gap_0.025_above.csv",
-      "test_seconds": 6.847444999963045,
+      "test_seconds": 6.877471068000887,
       "clipped_allocations_in_full_traces": 0,
       "validation": {
         "observations": 256,
-        "max_log_wealth_error": 7.882583474838611e-15
+        "max_log_wealth_error": 3.1086244689504383e-15
       }
     }
   ]

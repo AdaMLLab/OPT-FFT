@@ -8,7 +8,8 @@ from numpy.testing import assert_allclose, assert_array_equal
 from scipy.integrate import quad
 from scipy.special import betaln, logsumexp
 
-from opt_fft import FFTPortfolio, _nodes, _resample, _restrict, betting_mean_test, r70_moments
+from opt_fft import (FFTPortfolio, _nodes, _positive_fourier_sums, _resample,
+                     _restrict, betting_mean_test, r70_moments, r70_quadrature)
 
 
 def direct_r70(x, mean):
@@ -45,15 +46,48 @@ class FFTTests(unittest.TestCase):
             assert_allclose(weights @ expected, _restrict(weights, small) @ values, atol=2e-13)
 
     def test_continuous_r70_moments(self):
-        moments = r70_moments(70)
+        # This adaptive y=-log(beta) integral uses neither the angular
+        # quadrature panels nor the Fourier summation in production.
+        moments = r70_moments(4097)
         a = 1 + np.log(6.6)
-        for k in (2, 4, 16, 40, 70):
+        for k in (2, 4, 16, 40, 70, 256, 1024):
             center = (-1) ** (k // 2)
             def f(y):
-                return (np.cos(k * np.arccos(np.exp(-y))) - center) * np.log(a) / ((a + y) * np.log(a + y) ** 2)
-            expected = center + quad(f, 0, 40, epsabs=1e-12, limit=300)[0]
+                # cos(k*arcsin(beta))-1, evaluated without cancellation.
+                return -2 * np.sin(k * np.arcsin(np.exp(-y)) / 2) ** 2 * np.log(a) / ((a + y) * np.log(a + y) ** 2)
+            expected = center * (1 + quad(f, 0, np.log(k) + 30,
+                                          epsabs=2e-13, epsrel=2e-13, limit=1000)[0])
             self.assertAlmostEqual(moments[k], expected, places=11)
         assert_array_equal(moments[1::2], 0)
+        self.assertEqual(moments[0], 1)
+        refined = r70_moments(4097, tol=1e-14, oversample=1.25)
+        assert_allclose(moments, refined, rtol=0, atol=5e-13)
+
+    def test_nonuniform_fourier_sums(self):
+        rng = np.random.default_rng(22)
+        phase = np.r_[0, np.pi, rng.uniform(0, np.pi, 123)]
+        weight = rng.uniform(size=len(phase))
+        weight /= weight.sum()
+        for max_mode in (1, 19, 127):
+            reference = weight @ np.exp(1j * np.outer(phase, np.arange(max_mode + 1)))
+            for tol in (1e-3, 1e-9, 1e-13):
+                actual = _positive_fourier_sums(phase, weight, max_mode, tol)
+                assert_allclose(actual, reference, rtol=0, atol=tol + 3e-14)
+
+    def test_moment_tolerance_and_small_degrees(self):
+        assert_array_equal(r70_moments(0), [1])
+        assert_array_equal(r70_moments(1), [1, 0])
+        reference = r70_moments(129)
+        for tol in (.1, 1e-3, 1e-7):
+            assert_allclose(r70_moments(129, tol=tol), reference, rtol=0, atol=tol)
+        beta, weight, tail = r70_quadrature(129)
+        self.assertTrue(np.all((beta > 0) & (beta < 1)))
+        self.assertTrue(np.all(weight > 0))
+        self.assertAlmostEqual(weight.sum() + tail, 1, places=12)
+        for k in (2, 28, 128):
+            # A direct sum checks the quadrature API and the Fourier signs.
+            expected = weight @ np.cos(k * np.arccos(beta)) + tail * (-1) ** (k // 2)
+            assert_allclose(reference[k], expected, rtol=0, atol=2e-13)
 
     def test_all_prefixes_against_independent_integrals(self):
         rng = np.random.default_rng(3)
@@ -149,6 +183,17 @@ class FFTTests(unittest.TestCase):
         self.assertFalse(np.any(np.isnan(result.log_wealth)))
 
     def test_invalid_inputs(self):
+        for degree in (-1, .5, np.nan, np.inf):
+            with self.assertRaises(ValueError):
+                r70_moments(degree)
+        for tol in (0, -.1, .5, np.nan, np.inf):
+            with self.assertRaises(ValueError):
+                r70_moments(2, tol=tol)
+            with self.assertRaises(ValueError):
+                betting_mean_test([.5], .5, moment_tol=tol)
+        for oversample in (0, .5, np.nan, np.inf):
+            with self.assertRaises(ValueError):
+                FFTPortfolio(2, moment_oversample=oversample)
         for bad in ([np.nan], [-.1], [1.1], [[.5]], [np.inf]):
             with self.assertRaises(ValueError):
                 betting_mean_test(bad, .5)

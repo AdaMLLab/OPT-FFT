@@ -11,7 +11,7 @@ to compute cosine transforms.
 See the paper for the priors, numerical qualifications, and complexity:
 
 @article{orabon2026optimal,
-  title={Optimal Priors for Betting Tests with Bounded Payoffs: An Exact Efficiency Characterization},
+  title={Optimal Priors for Betting Tests with Bounded Payoffs: An Exact Expected-Time Characterization},
   author={Orabona, Francesco},
   journal={arXiv preprint arXiv:2610.25821},
   year={2026}
@@ -27,7 +27,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-from scipy.fft import dct, idct
+from scipy.fft import dct, idct, ifft
 from scipy.special import roots_legendre
 
 
@@ -65,42 +65,109 @@ def _unit_scale(values):
     return values / scale
 
 
-def r70_quadrature(degree, *, oversample=1.0):
-    """Positive rule for the CONTINUOUS R70 law, not a fixed bet grid.
+def _moment_parameters(degree, tol, oversample):
+    if not np.isfinite(degree) or int(degree) != degree or degree < 0:
+        raise ValueError("degree must be a nonnegative integer")
+    if not np.isfinite(tol) or not 0 < tol < 0.5:
+        raise ValueError("moment tolerance must be strictly between 0 and 0.5")
+    if not np.isfinite(oversample) or oversample < 1:
+        raise ValueError("moment oversample must be finite and at least 1")
+    return int(degree)
 
-    Return positive beta nodes, their total (both signs) masses, and the mass
-    below the cutoff.  y=-log|beta| removes the density singularity.  The
-    cutoff shrinks with degree; omitted T_k(beta)-T_k(0) is O(k^2 beta^2).
-    Computing these moments is additional work, outside the Prefix bound.
+
+@lru_cache(maxsize=32)
+def _legendre_rule(order):
+    return roots_legendre(order)
+
+
+def _r70_angular_quadrature(degree, tol, oversample):
+    # beta=sin(phi): even Chebyshev moments become cosine Fourier modes.
+    degree = max(2, degree)
+    cutoff = np.sqrt(tol) / (2 * degree)
+    edges = [cutoff]
+    while edges[-1] < np.pi / 2:
+        edges.append(min(2 * edges[-1], edges[-1] + 4 / degree, np.pi / 2))
+    edges = np.asarray(edges)
+    # The appendix bounds the total Gauss error by
+    # 1024 * degree / sqrt(tol) * 4**(-order) <= tol/8.
+    order = int(np.ceil(oversample * (np.log(8192) + np.log(degree)
+                                    - 1.5 * np.log(tol)) / np.log(4)))
+    z, w = _legendre_rule(order)
+    half_width = np.diff(edges)[:, None] / 2
+    phi = (edges[:-1, None] + (z + 1) * half_width).ravel()
+    log_ratio = 1 + np.log(6.6) - np.log(np.sin(phi))
+    normalizer = np.log(1 + np.log(6.6))
+    weight = ((half_width * w).ravel() * normalizer * np.cos(phi)
+              / (np.sin(phi) * log_ratio * np.log(log_ratio) ** 2))
+    tail = normalizer / np.log(1 + np.log(6.6) - np.log(np.sin(cutoff)))
+    return phi, weight, tail
+
+
+def r70_quadrature(degree, *, tol=1e-13, oversample=1.0):
+    """Positive quadrature for the continuous symmetric R70 law.
+
+    Return positive beta nodes, total (both signs) weights, and the exact
+    mass below the cutoff, represented at beta=0. The cutoff and panel
+    order depend on degree and absolute moment tolerance. Weights sum to
+    1-tail up to quadrature/roundoff error. This materialized rule is also
+    useful for direct validation; r70_moments evaluates its modes by FFT.
     """
-    a = 1 + np.log(6.6)  # log(c), c=6.6e in Orabona--Jun
-    normalizer = np.log(a)
-    ymax = np.log(max(1, degree)) + 28.0
-    edges = np.r_[np.arange(0, ymax, 0.5), ymax]
-    nodes, weights = [], []
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        phase = np.arccos(np.exp(-hi)) - np.arccos(np.exp(-lo))
-        order = max(24, int(np.ceil(oversample * degree * phase / 2)) + 24)
-        z, w = roots_legendre(order)
-        y = lo + (z + 1) * (hi - lo) / 2
-        nodes.append(np.exp(-y))
-        weights.append(w * (hi - lo) / 2 * normalizer / ((a + y) * np.log(a + y) ** 2))
-    beta, weight = np.concatenate(nodes), np.concatenate(weights)
-    tail = normalizer / np.log(a + ymax)
-    weight *= (1 - tail) / weight.sum()
-    return beta, weight, tail
+    degree = _moment_parameters(degree, tol, oversample)
+    phi, weight, tail = _r70_angular_quadrature(degree, tol, oversample)
+    return np.sin(phi), weight, tail
 
 
-def r70_moments(degree, *, oversample=1.0):
-    """E[T_k(beta)], k=0,...,degree, for the symmetric R70 law."""
-    beta, weight, tail = r70_quadrature(degree, oversample=oversample)
+def _positive_fourier_sums(phase, weight, max_mode, tol):
+    """Sum weight*exp(1j*k*phase), 0<=k<=max_mode, by oversampled FFTs.
+
+    Phases lie in [0, pi] and weights are positive. Nearest-grid offsets
+    are scaled to [-1, 1], and k times an unscaled offset is <= pi/4.
+    The Taylor remainder is bounded by tol * sum(abs(weight)).
+    """
+    size = 1 << max(2, (4 * max_mode - 1).bit_length())
+    step = 2 * np.pi / size
+    nearest = np.rint(phase / step).astype(np.intp)
+    offset = (phase - step * nearest) * (size / np.pi)
+    # e**(pi/4)*(pi/4)**terms/terms! bounds each exponential error.
+    terms, remainder = 0, np.exp(np.pi / 4)
+    while remainder > tol:
+        terms += 1
+        remainder *= (np.pi / 4) / terms
+    weighted_power = weight.copy()
+    factor = np.ones(max_mode + 1, dtype=complex)
+    increment = 1j * np.arange(max_mode + 1) * (np.pi / size)
+    sums = np.zeros(max_mode + 1, dtype=complex)
+    for r in range(terms):
+        grid = np.bincount(nearest, weights=weighted_power, minlength=size)
+        sums += factor * (ifft(grid)[:max_mode + 1] * size)
+        weighted_power *= offset
+        factor *= increment / (r + 1)
+    return sums
+
+
+def r70_moments(degree, *, tol=1e-13, oversample=1.0):
+    """E[T_k(beta)], k=0,...,degree, for the symmetric continuous R70 law.
+
+    Tail integration, panel quadrature, and nonuniform Fourier summation
+    target absolute error tol in exact arithmetic; floating-point roundoff
+    is additional. For degree T>=2, setup costs
+    O((T+log(1/tol))*log(T/tol)*log(1/tol)) operations and
+    O((T+log(1/tol))*log(T/tol)) memory. If tol=T**(-s), these are
+    O(s*(1+s)*(T+s*log(T))*log(T)**2) operations and
+    O((1+s)*(T+s*log(T))*log(T)) memory. Constants are independent of
+    T, tol, and s, with oversample fixed.
+    These are moment errors, not relative errors in portfolio wealth.
+    """
+    degree = _moment_parameters(degree, tol, oversample)
     moments = np.zeros(degree + 1)
     moments[0] = 1
-    previous, current = np.ones_like(beta), beta.copy()
-    for k in range(2, degree + 1):
-        previous, current = current, 2 * beta * current - previous
-        if k % 2 == 0:
-            moments[k] = np.sum(weight * current) + tail * (-1) ** (k // 2)
+    if degree < 2:
+        return moments
+    phi, weight, tail = _r70_angular_quadrature(degree, tol, oversample)
+    sums = _positive_fourier_sums(2 * phi, weight, degree // 2, tol / 16)
+    moments[::2] = tail + sums.real
+    moments[2::4] *= -1
+    moments[0] = 1  # The zeroth moment and all odd moments are known exactly.
     return moments
 
 
@@ -140,20 +207,20 @@ class FFTPortfolio:
 
     For a fixed null mean, every allocation depends only on its prefix.
     Fix the horizon in advance when interpreting rounded allocations as a
-    betting strategy.  In exact arithmetic the answer is horizon-independent.
+    betting strategy. With exact moments and exact arithmetic the answer is
+    horizon-independent.
     """
 
-    def __init__(self, horizon, *, leaf_size=64, moment_oversample=1.0):
+    def __init__(self, horizon, *, leaf_size=64, moment_tol=1e-13, moment_oversample=1.0):
         if int(horizon) != horizon or horizon < 0:
             raise ValueError("horizon must be a nonnegative integer")
         if int(leaf_size) != leaf_size or leaf_size < 1:
             raise ValueError("leaf_size must be a positive integer")
-        if not np.isfinite(moment_oversample) or moment_oversample < 1:
-            raise ValueError("moment_oversample must be at least 1")
         self.horizon = int(horizon)
         self._tree_size = 1 << max(0, (max(1, self.horizon) - 1).bit_length())
         self.leaf_size = int(leaf_size)
-        self.moments = r70_moments(self._tree_size + 1, oversample=moment_oversample)
+        self.moments = r70_moments(self._tree_size + 1, tol=moment_tol,
+                                   oversample=moment_oversample)
         self._initial_weights = {}
         for prior in ("co96", "r70"):
             length = self._tree_size
@@ -270,14 +337,14 @@ class FFTPortfolio:
                               int(crossings[0]) + 1 if len(crossings) else None)
 
 
-def betting_mean_test(x, mu0, alpha=0.05, *, leaf_size=64):
+def betting_mean_test(x, mu0, alpha=0.05, *, leaf_size=64, moment_tol=1e-13):
     """Run OPT-FFT for a specified interior null mean and observations in [0, 1].
 
     This batch interface returns all prefix wealths, anytime p-values, and
     the first rejection time. For repeated tests, reuse FFTPortfolio.test.
     """
     x = _data(x)
-    return FFTPortfolio(len(x), leaf_size=leaf_size).test(x, mu0, alpha)
+    return FFTPortfolio(len(x), leaf_size=leaf_size, moment_tol=moment_tol).test(x, mu0, alpha)
 
 
 def main():
@@ -285,12 +352,14 @@ def main():
     parser.add_argument("input", type=Path, help="one-column CSV/text file, or .npy array")
     parser.add_argument("--mu0", type=float, required=True, help="null mean, strictly between 0 and 1")
     parser.add_argument("--alpha", type=float, default=0.05, help="type-I error level")
+    parser.add_argument("--moment-tol", type=float, default=1e-13,
+                        help="absolute moment approximation tolerance (default: 1e-13)")
     parser.add_argument("--output", type=Path, default=Path("mean_test.csv"))
     args = parser.parse_args()
     x = np.load(args.input) if args.input.suffix == ".npy" else np.loadtxt(args.input, delimiter=",")
     x = np.atleast_1d(x)
     try:
-        result = betting_mean_test(x, args.mu0, args.alpha)
+        result = betting_mean_test(x, args.mu0, args.alpha, moment_tol=args.moment_tol)
     except ValueError as error:
         parser.error(str(error))
     times = np.arange(1, len(x) + 1)

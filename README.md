@@ -14,13 +14,12 @@ The algorithm and motivation are described in
 
 ```
 @article{orabon2026optimal,
-  title={Optimal Priors for Betting Tests with Bounded Payoffs: An Exact Efficiency Characterization},
+  title={Optimal Priors for Betting Tests with Bounded Payoffs: An Exact Expected-Time Characterization},
   author={Orabona, Francesco},
   journal={arXiv preprint arXiv:2610.25821},
   year={2026}
 }
 ```
-
 
 ## Installation
 
@@ -67,6 +66,34 @@ python opt_fft.py data.npy --mu0 0.5 --alpha 0.05 --output mean_test.csv
 The output columns are `n,x,log_wealth,p_value,rejected`. The rejection column
 stays one after the first crossing.
 
+## Moment accuracy
+
+R70 preprocessing uses the substitution `abs(beta) = sin(phi)`, integrates
+the mass near zero analytically, and applies Gaussian quadrature on panels
+that resolve both the density and the required cosine frequencies. An
+oversampled nonuniform FFT computes all the even Chebyshev moments together;
+the zeroth and odd moments are exact.
+
+The default absolute moment tolerance is `1e-13`. Set `moment_tol` in
+`betting_mean_test` or `FFTPortfolio`, or use `--moment-tol` on the command
+line. For repeated tests, reuse the same engine; the R70 moments do not
+depend on the null mean:
+
+```python
+from opt_fft import FFTPortfolio
+
+engine = FFTPortfolio(10000, moment_tol=1e-13)
+result = engine.test(x, mu0=0.5, alpha=0.05)
+```
+
+The tolerance controls absolute moment approximation error before floating-point roundoff. Computed allocations are projected onto their admissible intervals, and wealth is accumulated from their returns. Fix the horizon before observing the data when interpreting these allocations as a predictable betting strategy.
+
+Run the independent integration, Fourier accuracy, and betting checks with:
+
+```bash
+OPENBLAS_NUM_THREADS=1 python -m unittest -v test_opt_fft.py
+```
+
 ## Run the experiments
 
 ```bash
@@ -92,10 +119,9 @@ first trial in each scenario.
 
 Curves show average log wealth over all trials, including after rejection,
 with shading of ±1 standard error. The display ends 10% above the individual
-test's log rejection threshold; saved traces cover the full horizon. Crossing
-the threshold with the average curve is not a test decision.
+test's log rejection threshold, while saved traces cover the full horizon.
 
-Stopping-time averages count trials that have not been rejected by the horizon as
+Stopping-time averages count trials that have not rejected by the horizon as
 having reached the horizon. They therefore summarize capped stopping times.
 
 ![OPT-FFT mean tests with decreasing gaps](results/mean_tests.png)
