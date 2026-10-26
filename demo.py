@@ -3,7 +3,7 @@
 Test a fixed bounded mean against Bernoulli means above the null, with increasing difficulty.
 
 The test mixes the CO96 (Cover and Ordentlich, 1996) and R70 (Robbins, 1970)
-priors, following Orabona and Jun (2024), with equal weights.
+priors, with equal weights, following Remark 2 in Orabona and Jun (2024).
 
 Run: OPENBLAS_NUM_THREADS=1 python demo.py
 """
@@ -27,32 +27,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy
 
-from opt_fft import FFTPortfolio, r70_quadrature
+from opt_fft import FFTPortfolio
+from validation import direct_grid_wealth
 
 ROOT = Path(__file__).resolve().parent
-
-
-def direct_wealth(x, mu0):
-    """Positive-quadrature reference used only for numerical validation."""
-    count = (len(x) + 2) // 2
-    p = (1 + np.cos(np.pi * (np.arange(count) + .5) / count)) / 2
-    co96_weights = np.full(count, 1 / count)
-    beta, weights, tail = r70_quadrature(len(x) + 1, oversample=1.5)
-    beta = np.r_[beta, -beta, 0]
-    r_weights = np.r_[weights / 2, weights / 2, tail]
-    co96, r = np.empty(len(x)), np.empty(len(x))
-    log_co96, log_r = 0.0, 0.0
-    for i, value in enumerate(x):
-        co96_weights *= p * value / mu0 + (1 - p) * (1 - value) / (1 - mu0)
-        total = co96_weights.sum()
-        log_co96 += np.log(total)
-        co96_weights /= total
-        r_weights *= 1 + beta * (value - mu0)
-        total = r_weights.sum()
-        log_r += np.log(total)
-        r_weights /= total
-        co96[i], r[i] = log_co96, log_r
-    return np.logaddexp(co96, r) - np.log(2)
 
 
 def plot_tests(scenarios, traces, mu0, alpha, horizon, trials, out):
@@ -124,14 +102,14 @@ def main():
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     start = perf_counter()
-    engine = FFTPortfolio(args.n)
+    engine = FFTPortfolio(args.n).prepare(args.mu0)
     setup_seconds = perf_counter() - start
     # Common random numbers make scenarios reproducible and comparable;
     # the trials within each scenario are independent.
     uniforms = np.random.default_rng(args.seed).uniform(size=(args.trials, args.n))
     scenarios, traces, trial_rows = [], [], []
     print(f"OPT-FFT: testing E[X] = {args.mu0:g}; alpha={args.alpha:g}, horizon={args.n}, trials={args.trials}, seed={args.seed}", flush=True)
-    print(f"Moment setup: {setup_seconds:.3f}s", flush=True)
+    print(f"Continuous-prior moment and regional-rule setup: {setup_seconds:.3f}s", flush=True)
     for gap in gaps:
         true_mean = args.mu0 + gap
         capped, rejected, clipping = [], [], 0
@@ -173,7 +151,7 @@ def main():
         if args.validate:
             x = (uniforms[0, :min(256, args.n)] < true_mean).astype(float)
             fast = engine.wealth(x, args.mu0)
-            error = float(np.max(abs(fast.log_wealth - direct_wealth(x, args.mu0))))
+            error = float(np.max(abs(fast.log_wealth - direct_grid_wealth(x, args.mu0, co96_nodes=max(1024, (len(x)+2)//2), r70_order=32).log_wealth)))
             if error >= 1e-8:
                 raise RuntimeError(f"FFT/quadrature validation failed for mean {true_mean:g}: {error:g}")
             row["validation"] = {"observations": len(x), "max_log_wealth_error": error}
@@ -192,7 +170,10 @@ def main():
         writer.writerows(scenarios)
     report = {"method": "OPT-FFT", "prior_names": ["CO96", "R70"], "distribution": "Bernoulli", "mu0": args.mu0,
               "alpha": args.alpha, "horizon": args.n, "trials": args.trials, "gaps": gaps,
-              "seed": args.seed, "prior_weights": [.5, .5], "moment_setup_seconds": setup_seconds,
+              "seed": args.seed, "prior_weights": [.5, .5], "setup_seconds": setup_seconds,
+              "implementation": "regional_fft",
+              "numerics": {"panels_per_side": engine.panels_per_side, "leaf_size": 32,
+                           "moment_tol": 1e-13, "moment_oversample": 1.},
               "trace_statistic": "sample mean of log wealth over all trials at each time, continuing after rejection",
               "trace_uncertainty": "pointwise standard error across trials; zero placeholder for a single trial",
               "time_statistic": "sample mean of min(stopping time, horizon); unrejected trials are censored",

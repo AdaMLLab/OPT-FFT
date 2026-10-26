@@ -1,6 +1,10 @@
-"""OPT-FFT checks: independent quadrature, analytic cases, and predictability."""
+"""OPT-FFT: grid accuracy, independent integrals, and predictable FFT blocks."""
 
 from itertools import product
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -8,8 +12,11 @@ from numpy.testing import assert_allclose, assert_array_equal
 from scipy.integrate import quad
 from scipy.special import betaln, logsumexp
 
-from opt_fft import (FFTPortfolio, _nodes, _positive_fourier_sums, _resample,
-                     _restrict, betting_mean_test, r70_moments, r70_quadrature)
+from opt_fft import (FFTPortfolio, _nodes, _resample, _restrict,
+                     betting_mean_test)
+from prior_moments import panel_moments, prior_mass
+from validation import direct_grid_wealth
+
 
 
 def direct_r70(x, mean):
@@ -35,6 +42,88 @@ def direct_co96_log(x, mean):
 
 
 class FFTTests(unittest.TestCase):
+    def test_continuous_region_moments_and_masses(self):
+        from scipy.special import eval_chebyt
+        for prior, lower, upper in (("co96", 0., .3), ("co96", .2, .6),
+                                     ("co96", .9, 1.), ("r70", .01, .2)):
+            actual = panel_moments(prior, lower, upper, 64)
+            mass = prior_mass(prior, lower, upper)
+            a = 1+np.log(6.6)
+            def density(v):
+                if prior == "co96":
+                    return 1/(np.pi*np.sqrt(v*(1-v)))
+                d = a-np.log(v)
+                return np.log(a)/(2*v*d*np.log(d)**2)
+            for k in (0, 1, 2, 5, 16):
+                expected = quad(lambda v: eval_chebyt(k, (2*v-lower-upper)/(upper-lower))*density(v),
+                                lower, upper, epsabs=1e-12, epsrel=1e-12, limit=1000)[0]/mass
+                assert_allclose(actual[k], expected, atol=3e-11, rtol=0)
+            refined = panel_moments(prior, lower, upper, 64, tol=1e-14, oversample=2)
+            assert_allclose(actual, refined, atol=3e-12, rtol=0)
+        radius = .03
+        central = panel_moments("r70", -radius, radius, 64)
+        a = 1+np.log(6.6)-np.log(radius)
+        for k in (2, 4, 16, 64):
+            excess = quad(lambda y: -2*np.sin(k*np.arcsin(np.exp(-y))/2)**2
+                          *np.log(a)/((a+y)*np.log(a+y)**2),
+                          0, 80, epsabs=1e-13, epsrel=1e-13, limit=1000)[0]
+            expected = (-1)**(k//2)*(1+excess)
+            assert_allclose(central[k], expected, atol=3e-12, rtol=0)
+        assert_array_equal(central[1::2], 0)
+        engine = FFTPortfolio(100, panels_per_side=4)
+        for mean in (.2, .5, .8):
+            for prior in ("co96", "r70"):
+                masses = [prior_mass(prior, lo, hi) for lo, hi in engine._regions(prior, mean)]
+                assert_allclose(sum(masses), 1, atol=3e-15, rtol=0)
+                self.assertTrue(all(m > 0 for m in masses))
+
+    def test_supplied_moments_and_partition_invariance(self):
+        x = np.random.default_rng(19).uniform(size=37)
+        calls = []
+        def supplied(prior, lower, upper, degree):
+            calls.append((prior, lower, upper, degree))
+            return panel_moments(prior, lower, upper, degree, tol=1e-14, oversample=2)
+        for panels in (1, 2, 4):
+            result = FFTPortfolio(len(x), panels_per_side=panels, leaf_size=4,
+                                  moment_provider=supplied).wealth(x, .4)
+            for n in (1, 8, 17, 37):
+                assert_allclose(result.log_co96[n-1], direct_co96_log(x[:n], .4), atol=3e-11)
+                assert_allclose(result.log_r70[n-1], np.log(direct_r70(x[:n], .4)), atol=3e-11)
+        self.assertTrue(calls)
+        self.assertTrue(all(degree >= len(x) for _, _, _, degree in calls))
+
+    def test_cli_uses_the_default_engine_and_new_parameters(self):
+        x = np.r_[np.ones(30), np.zeros(30)]
+        with tempfile.TemporaryDirectory() as temporary:
+            source, output = Path(temporary)/"data.npy", Path(temporary)/"trace.csv"
+            np.save(source, x)
+            command = [sys.executable, str(Path(__file__).with_name("opt_fft.py")),
+                       str(source), "--mu0", ".4", "--output", str(output)]
+            for options in ([], ["--panels-per-side", "4", "--leaf-size", "2",
+                                 "--moment-tol", "1e-12", "--moment-oversample", "1.5"]):
+                completed = subprocess.run(command+options, capture_output=True, text=True)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                parameters = (dict(panels_per_side=4, leaf_size=2, moment_tol=1e-12, moment_oversample=1.5) if options else {})
+                expected = betting_mean_test(x, .4, **parameters)
+                trace = np.loadtxt(output, delimiter=",", skiprows=1)
+                assert_allclose(trace[:, 2], expected.wealth.log_wealth, atol=1e-13)
+                assert_allclose(trace[:, 3], expected.p_values, atol=1e-13)
+                assert_array_equal(trace[:, 4], np.arange(1, len(x)+1) >= expected.stopping_time)
+            rejected = subprocess.run(command+["--panels-per-side", "0"], capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("positive integer", rejected.stderr)
+
+    def test_invalid_data_and_test_parameters(self):
+        for bad in ([np.nan], [-.1], [1.1], [[.5]], [np.inf]):
+            with self.assertRaises(ValueError):
+                betting_mean_test(bad, .5)
+        for alpha in (0, 1, np.nan, np.inf):
+            with self.assertRaises(ValueError):
+                betting_mean_test([.5], .5, alpha)
+        for mean in (0, 1, -.1, 1.1, np.nan, np.inf):
+            with self.assertRaises(ValueError):
+                betting_mean_test([.5], mean)
+
     def test_grid_and_adjoint(self):
         rng = np.random.default_rng(8)
         for small, large in ((1, 7), (4, 15), (17, 35)):
@@ -44,50 +133,6 @@ class FFTTests(unittest.TestCase):
             assert_allclose(_resample(values, large), expected, atol=2e-13)
             weights = rng.normal(size=large)
             assert_allclose(weights @ expected, _restrict(weights, small) @ values, atol=2e-13)
-
-    def test_continuous_r70_moments(self):
-        # This adaptive y=-log(beta) integral uses neither the angular
-        # quadrature panels nor the Fourier summation in production.
-        moments = r70_moments(4097)
-        a = 1 + np.log(6.6)
-        for k in (2, 4, 16, 40, 70, 256, 1024):
-            center = (-1) ** (k // 2)
-            def f(y):
-                # cos(k*arcsin(beta))-1, evaluated without cancellation.
-                return -2 * np.sin(k * np.arcsin(np.exp(-y)) / 2) ** 2 * np.log(a) / ((a + y) * np.log(a + y) ** 2)
-            expected = center * (1 + quad(f, 0, np.log(k) + 30,
-                                          epsabs=2e-13, epsrel=2e-13, limit=1000)[0])
-            self.assertAlmostEqual(moments[k], expected, places=11)
-        assert_array_equal(moments[1::2], 0)
-        self.assertEqual(moments[0], 1)
-        refined = r70_moments(4097, tol=1e-14, oversample=1.25)
-        assert_allclose(moments, refined, rtol=0, atol=5e-13)
-
-    def test_nonuniform_fourier_sums(self):
-        rng = np.random.default_rng(22)
-        phase = np.r_[0, np.pi, rng.uniform(0, np.pi, 123)]
-        weight = rng.uniform(size=len(phase))
-        weight /= weight.sum()
-        for max_mode in (1, 19, 127):
-            reference = weight @ np.exp(1j * np.outer(phase, np.arange(max_mode + 1)))
-            for tol in (1e-3, 1e-9, 1e-13):
-                actual = _positive_fourier_sums(phase, weight, max_mode, tol)
-                assert_allclose(actual, reference, rtol=0, atol=tol + 3e-14)
-
-    def test_moment_tolerance_and_small_degrees(self):
-        assert_array_equal(r70_moments(0), [1])
-        assert_array_equal(r70_moments(1), [1, 0])
-        reference = r70_moments(129)
-        for tol in (.1, 1e-3, 1e-7):
-            assert_allclose(r70_moments(129, tol=tol), reference, rtol=0, atol=tol)
-        beta, weight, tail = r70_quadrature(129)
-        self.assertTrue(np.all((beta > 0) & (beta < 1)))
-        self.assertTrue(np.all(weight > 0))
-        self.assertAlmostEqual(weight.sum() + tail, 1, places=12)
-        for k in (2, 28, 128):
-            # A direct sum checks the quadrature API and the Fourier signs.
-            expected = weight @ np.cos(k * np.arccos(beta)) + tail * (-1) ** (k // 2)
-            assert_allclose(reference[k], expected, rtol=0, atol=2e-13)
 
     def test_all_prefixes_against_independent_integrals(self):
         rng = np.random.default_rng(3)
@@ -159,52 +204,82 @@ class FFTTests(unittest.TestCase):
         self.assertIsNone(empty.stopping_time)
         self.assertEqual(len(empty.p_values), 0)
 
-    def test_null_error_by_enumerating_bernoulli_paths(self):
-        # Sum the exact null probabilities of all paths that reject by n=8.
-        engine, alpha = FFTPortfolio(8, leaf_size=4), .2
-        for mu0 in (.2, .5, .8):
-            probability = 0.0
-            for path in product((0.0, 1.0), repeat=8):
-                if engine.test(path, mu0, alpha).rejected:
-                    successes = sum(path)
-                    probability += mu0 ** successes * (1 - mu0) ** (8 - successes)
-            self.assertLessEqual(probability, alpha + 1e-12)
-
-    def test_reversal_keeps_bets_admissible(self):
-        # Severe reversals may destroy FFT relative accuracy. Even then the
-        # reported wealth must be the wealth of the clipped predictable bets.
+    def test_reversal_matches_independent_integrals(self):
         x = np.r_[np.ones(256), np.zeros(256)]
         result = FFTPortfolio(len(x)).wealth(x, .5)
-        self.assertTrue(np.all((result.co96_allocation >= 0) & (result.co96_allocation <= 1)))
-        self.assertTrue(np.all(abs(result.r70_bet) <= 1))
-        with np.errstate(divide="ignore"):
-            expected = np.cumsum(np.log(result.co96_allocation * x / .5 + (1 - result.co96_allocation) * (1 - x) / .5))
-        assert_allclose(result.log_co96, expected)
-        self.assertFalse(np.any(np.isnan(result.log_wealth)))
+        t = np.arange(1, len(x)+1)
+        s = np.cumsum(x)
+        co96 = betaln(s+.5, t-s+.5)-betaln(.5,.5)+t*np.log(2)
+        assert_allclose(result.log_co96, co96, atol=2e-8, rtol=0)
+        for end in (256, 260, 320, 512):
+            assert_allclose(result.log_r70[end-1], np.log(direct_r70(x[:end], .5)), atol=2e-8, rtol=0)
+        self.assertEqual(result.clipped_allocations, 0)
+        self.assertGreater(result.regions_co96, 1)
+        self.assertGreater(result.regions_r70, 1)
 
-    def test_invalid_inputs(self):
-        for degree in (-1, .5, np.nan, np.inf):
+    def test_predictability_across_block_boundaries(self):
+        x = np.r_[np.ones(96), np.zeros(96)]
+        engine = FFTPortfolio(len(x), leaf_size=4)
+        full = engine.wealth(x, .5)
+        for end in (1, 7, 16, 33, 96, 97, 100, 128, 191):
+            prefix = engine.wealth(x[:end], .5)
+            changed = x.copy()
+            changed[end-1:] = 1 - changed[end-1:]
+            other = engine.wealth(changed, .5)
+            assert_allclose(prefix.log_wealth, full.log_wealth[:end], atol=2e-12, rtol=0)
+            assert_allclose(other.co96_allocation[:end], full.co96_allocation[:end], atol=2e-12, rtol=0)
+            assert_allclose(other.r70_bet[:end], full.r70_bet[:end], atol=2e-12, rtol=0)
+
+    def test_accumulated_returns_and_test_api(self):
+        x = np.r_[np.ones(64), np.zeros(64)]
+        engine = FFTPortfolio(len(x))
+        test = engine.test(x, .4, .05)
+        result = test.wealth
+        co96 = np.cumsum(np.log(result.co96_allocation*x/.4
+                               + (1-result.co96_allocation)*(1-x)/.6))
+        r70 = np.cumsum(np.log1p(result.r70_bet*(x-.4)))
+        assert_allclose(result.log_co96, co96, atol=2e-12, rtol=0)
+        assert_allclose(result.log_r70, r70, atol=2e-12, rtol=0)
+        assert_allclose(result.log_wealth, np.logaddexp(co96, r70)-np.log(2), atol=2e-12, rtol=0)
+        crossing = np.flatnonzero(result.log_wealth >= -np.log(.05))[0]+1
+        self.assertEqual(test.stopping_time, crossing)
+        self.assertTrue(np.all(np.diff(test.p_values) <= 0))
+        empty = FFTPortfolio(0).test([], .5)
+        self.assertIsNone(empty.stopping_time)
+        self.assertEqual(empty.wealth.regions_co96, 0)
+
+    def test_null_error_by_path_enumeration(self):
+        engine = FFTPortfolio(7, panels_per_side=2, leaf_size=2)
+        for mean in (.3, .7):
+            probability = 0.
+            for path in product((0., 1.), repeat=7):
+                if engine.test(path, mean, .2).rejected:
+                    successes = sum(path)
+                    probability += mean**successes*(1-mean)**(7-successes)
+            self.assertLessEqual(probability, .2+1e-12)
+
+    def test_invalid_parameters(self):
+        for horizon in (-1, .5, np.inf, np.nan):
             with self.assertRaises(ValueError):
-                r70_moments(degree)
-        for tol in (0, -.1, .5, np.nan, np.inf):
+                FFTPortfolio(horizon)
+        for name in ("panels_per_side", "leaf_size"):
+            for value in (0, -1, .5, np.inf, np.nan):
+                with self.assertRaises(ValueError):
+                    FFTPortfolio(8, **{name: value})
+        for tol in (0, -.1, .5, np.inf, np.nan):
             with self.assertRaises(ValueError):
-                r70_moments(2, tol=tol)
+                FFTPortfolio(8, moment_tol=tol)
+        for oversample in (0, .5, np.inf, np.nan):
             with self.assertRaises(ValueError):
-                betting_mean_test([.5], .5, moment_tol=tol)
-        for oversample in (0, .5, np.nan, np.inf):
-            with self.assertRaises(ValueError):
-                FFTPortfolio(2, moment_oversample=oversample)
-        for bad in ([np.nan], [-.1], [1.1], [[.5]], [np.inf]):
-            with self.assertRaises(ValueError):
-                betting_mean_test(bad, .5)
-        for alpha in (0, 1, np.nan, np.inf):
-            with self.assertRaises(ValueError):
-                betting_mean_test([.5], .5, alpha)
-        for mu0 in (0, 1, -.1, 1.1, np.nan, np.inf):
-            with self.assertRaises(ValueError):
-                betting_mean_test([.5], mu0)
+                FFTPortfolio(8, moment_oversample=oversample)
         with self.assertRaises(ValueError):
-            FFTPortfolio(1).wealth([.3, .4], .5)
+            FFTPortfolio(8, moment_provider=1)
+        with self.assertRaises(ValueError):
+            FFTPortfolio(8, moment_provider=lambda *args: np.ones(1)).wealth([.5], .5)
+        engine = FFTPortfolio(1)
+        for x, mean in (([0, 1], .5), ([np.nan], .5), ([.5], 0), ([.5], 1)):
+            with self.assertRaises(ValueError):
+                engine.wealth(x, mean)
 
 
 if __name__ == "__main__":

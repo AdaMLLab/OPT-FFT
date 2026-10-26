@@ -6,8 +6,13 @@ CO96 denotes the Beta(1/2, 1/2) portfolio prior analyzed by Cover and Ordentlich
 (1996). R70 denotes the Robbins (1970) prior adapted by Orabona and Jun (2024)
 to betting fractions in [-1, 1].
 
-The one-dimensional Prefix algorithm uses fast Fourier transforms (FFTs)
-to compute cosine transforms.
+A fixed partition of the betting interval separates regions with very
+unequal wealth. Each region uses the continuous conditional prior and its
+own FFT-based computation of the wealth.
+
+The rules are polynomial-exact through the configured horizon when their prior moments and arithmetic are
+exact.
+
 See the paper for the priors, numerical qualifications, and complexity:
 
 @article{orabon2026optimal,
@@ -27,8 +32,10 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-from scipy.fft import dct, idct, ifft
-from scipy.special import roots_legendre
+from scipy.fft import dct, idct
+
+from prior_moments import panel_moments, prior_mass
+
 
 
 def _data(x):
@@ -58,124 +65,32 @@ def _restrict(weights, n):
     return _resample(weights, n) * (weights.shape[-1] / n)
 
 
-def _unit_scale(values):
-    scale = np.max(np.abs(values))
-    if not np.isfinite(scale) or scale == 0:
-        raise FloatingPointError("degenerate polynomial/functional in FFT recursion")
-    return values / scale
-
-
-def _moment_parameters(degree, tol, oversample):
-    if not np.isfinite(degree) or int(degree) != degree or degree < 0:
-        raise ValueError("degree must be a nonnegative integer")
-    if not np.isfinite(tol) or not 0 < tol < 0.5:
-        raise ValueError("moment tolerance must be strictly between 0 and 0.5")
-    if not np.isfinite(oversample) or oversample < 1:
-        raise ValueError("moment oversample must be finite and at least 1")
-    return int(degree)
-
-
-@lru_cache(maxsize=32)
-def _legendre_rule(order):
-    return roots_legendre(order)
-
-
-def _r70_angular_quadrature(degree, tol, oversample):
-    # beta=sin(phi): even Chebyshev moments become cosine Fourier modes.
-    degree = max(2, degree)
-    cutoff = np.sqrt(tol) / (2 * degree)
-    edges = [cutoff]
-    while edges[-1] < np.pi / 2:
-        edges.append(min(2 * edges[-1], edges[-1] + 4 / degree, np.pi / 2))
-    edges = np.asarray(edges)
-    # The appendix bounds the total Gauss error by
-    # 1024 * degree / sqrt(tol) * 4**(-order) <= tol/8.
-    order = int(np.ceil(oversample * (np.log(8192) + np.log(degree)
-                                    - 1.5 * np.log(tol)) / np.log(4)))
-    z, w = _legendre_rule(order)
-    half_width = np.diff(edges)[:, None] / 2
-    phi = (edges[:-1, None] + (z + 1) * half_width).ravel()
-    log_ratio = 1 + np.log(6.6) - np.log(np.sin(phi))
-    normalizer = np.log(1 + np.log(6.6))
-    weight = ((half_width * w).ravel() * normalizer * np.cos(phi)
-              / (np.sin(phi) * log_ratio * np.log(log_ratio) ** 2))
-    tail = normalizer / np.log(1 + np.log(6.6) - np.log(np.sin(cutoff)))
-    return phi, weight, tail
-
-
-def r70_quadrature(degree, *, tol=1e-13, oversample=1.0):
-    """Positive quadrature for the continuous symmetric R70 law.
-
-    Return positive beta nodes, total (both signs) weights, and the exact
-    mass below the cutoff, represented at beta=0. The cutoff and panel
-    order depend on degree and absolute moment tolerance. Weights sum to
-    1-tail up to quadrature/roundoff error. This materialized rule is also
-    useful for direct validation; r70_moments evaluates its modes by FFT.
-    """
-    degree = _moment_parameters(degree, tol, oversample)
-    phi, weight, tail = _r70_angular_quadrature(degree, tol, oversample)
-    return np.sin(phi), weight, tail
-
-
-def _positive_fourier_sums(phase, weight, max_mode, tol):
-    """Sum weight*exp(1j*k*phase), 0<=k<=max_mode, by oversampled FFTs.
-
-    Phases lie in [0, pi] and weights are positive. Nearest-grid offsets
-    are scaled to [-1, 1], and k times an unscaled offset is <= pi/4.
-    The Taylor remainder is bounded by tol * sum(abs(weight)).
-    """
-    size = 1 << max(2, (4 * max_mode - 1).bit_length())
-    step = 2 * np.pi / size
-    nearest = np.rint(phase / step).astype(np.intp)
-    offset = (phase - step * nearest) * (size / np.pi)
-    # e**(pi/4)*(pi/4)**terms/terms! bounds each exponential error.
-    terms, remainder = 0, np.exp(np.pi / 4)
-    while remainder > tol:
-        terms += 1
-        remainder *= (np.pi / 4) / terms
-    weighted_power = weight.copy()
-    factor = np.ones(max_mode + 1, dtype=complex)
-    increment = 1j * np.arange(max_mode + 1) * (np.pi / size)
-    sums = np.zeros(max_mode + 1, dtype=complex)
-    for r in range(terms):
-        grid = np.bincount(nearest, weights=weighted_power, minlength=size)
-        sums += factor * (ifft(grid)[:max_mode + 1] * size)
-        weighted_power *= offset
-        factor *= increment / (r + 1)
-    return sums
-
-
-def r70_moments(degree, *, tol=1e-13, oversample=1.0):
-    """E[T_k(beta)], k=0,...,degree, for the symmetric continuous R70 law.
-
-    Tail integration, panel quadrature, and nonuniform Fourier summation
-    target absolute error tol in exact arithmetic; floating-point roundoff
-    is additional. For degree T>=2, setup costs
-    O((T+log(1/tol))*log(T/tol)*log(1/tol)) operations and
-    O((T+log(1/tol))*log(T/tol)) memory. If tol=T**(-s), these are
-    O(s*(1+s)*(T+s*log(T))*log(T)**2) operations and
-    O((1+s)*(T+s*log(T))*log(T)) memory. Constants are independent of
-    T, tol, and s, with oversample fixed.
-    These are moment errors, not relative errors in portfolio wealth.
-    """
-    degree = _moment_parameters(degree, tol, oversample)
-    moments = np.zeros(degree + 1)
-    moments[0] = 1
-    if degree < 2:
-        return moments
-    phi, weight, tail = _r70_angular_quadrature(degree, tol, oversample)
-    sums = _positive_fourier_sums(2 * phi, weight, degree // 2, tol / 16)
-    moments[::2] = tail + sums.real
-    moments[2::4] *= -1
-    moments[0] = 1  # The zeroth moment and all odd moments are known exactly.
-    return moments
+def _positive_integer(value, name):
+    if not np.isfinite(value) or value < 1 or int(value) != value:
+        raise ValueError(f"{name} must be a positive integer")
+    return int(value)
 
 
 def _moment_weights(moments):
-    # w_j = (mu_0 + 2 sum_{k>0} mu_k cos(k theta_j))/N.
     coef = moments.copy()
-    coef[0] /= np.sqrt(2)
-    return idct(coef, type=2, norm="ortho") * np.sqrt(2 / len(coef))
+    coef[..., 0] /= np.sqrt(2)
+    return idct(coef, type=2, norm="ortho", axis=-1) * np.sqrt(2 / coef.shape[-1])
+
+
+def _region_scale(values):
+    # Every region has its own scale; never mix scales between regions.
+    maximum = np.max(np.abs(values), axis=tuple(range(1, values.ndim)), keepdims=True)
+    if np.any(~np.isfinite(maximum) | (maximum == 0)):
+        raise FloatingPointError("degenerate polynomial/functional in a regional FFT")
+    return values / maximum
+
+
+def _default_panels(horizon):
+    levels = max(1, int(np.ceil(np.log2(horizon + 1))))
+    rounded = 1 << (levels * levels - 1).bit_length()
+    tree = 1 << max(0, (max(1, horizon) - 1).bit_length())
+    return min(rounded, max(1, tree // 16))
+
 
 
 @dataclass
@@ -186,6 +101,9 @@ class WealthResult:
     co96_allocation: np.ndarray
     r70_bet: np.ndarray
     clipped_allocations: int
+    regions_co96: int = 0
+    regions_r70: int = 0
+
 
 
 @dataclass
@@ -203,125 +121,196 @@ class MeanTestResult:
 
 
 class FFTPortfolio:
-    """Reusable moments and FFT evaluator for a specified maximum horizon.
+    """Regional continuous-prior FFT evaluator for a fixed maximum horizon.
 
-    For a fixed null mean, every allocation depends only on its prefix.
-    Fix the horizon in advance when interpreting rounded allocations as a
-    betting strategy. With exact moments and exact arithmetic the answer is
-    horizon-independent.
+    panels_per_side determines the partition, not the quadrature degree.
+    Every region's integration rule covers the full horizon. A custom
+    moment_provider(prior, lower, upper, degree) returns the normalized
+    conditional Chebyshev moments m_0,...,m_degree of the continuous prior.
+    The default provider evaluates them numerically. Fix the horizon and
+    parameters before observing data to keep rounded allocations predictable.
     """
 
-    def __init__(self, horizon, *, leaf_size=64, moment_tol=1e-13, moment_oversample=1.0):
-        if int(horizon) != horizon or horizon < 0:
+    def __init__(self, horizon, *, panels_per_side=None, leaf_size=32,
+                 moment_tol=1e-13, moment_oversample=1.0, moment_provider=None):
+        if not np.isfinite(horizon) or horizon < 0 or int(horizon) != horizon:
             raise ValueError("horizon must be a nonnegative integer")
-        if int(leaf_size) != leaf_size or leaf_size < 1:
-            raise ValueError("leaf_size must be a positive integer")
+        if not np.isfinite(moment_tol) or not 0 < moment_tol < .5:
+            raise ValueError("moment tolerance must be strictly between 0 and 0.5")
+        if not np.isfinite(moment_oversample) or moment_oversample < 1:
+            raise ValueError("moment oversample must be finite and at least 1")
+        if moment_provider is not None and not callable(moment_provider):
+            raise ValueError("moment_provider must be callable")
         self.horizon = int(horizon)
         self._tree_size = 1 << max(0, (max(1, self.horizon) - 1).bit_length())
-        self.leaf_size = int(leaf_size)
-        self.moments = r70_moments(self._tree_size + 1, tol=moment_tol,
-                                   oversample=moment_oversample)
-        self._initial_weights = {}
-        for prior in ("co96", "r70"):
-            length = self._tree_size
-            z = _nodes(length + 1)
-            coordinate = (1 + z) / 2 if prior == "co96" else z
-            weight = (np.full(length + 1, 1 / (length + 1)) if prior == "co96"
-                      else _moment_weights(self.moments[:length + 1]))
-            functional = np.stack((weight, weight * coordinate))
-            self._initial_weights[prior, length] = functional
-            while length > self.leaf_size:
-                length //= 2
-                functional = _unit_scale(_restrict(functional, length + 1))
-                self._initial_weights[prior, length] = functional
+        self.panels_per_side = (_default_panels(self.horizon) if panels_per_side is None
+                                else _positive_integer(panels_per_side, "panels_per_side"))
+        self.leaf_size = _positive_integer(leaf_size, "leaf_size")
+        self.moment_tol = float(moment_tol)
+        self.moment_oversample = float(moment_oversample)
+        self.moment_provider = moment_provider
+        self._r70 = None
+        self._co96 = None
+        self._co96_mean = None
 
-    def _allocations(self, x, mean, prior):
-        n = len(x)
-        if n == 0:
-            return np.empty(0), 0
-        # Skip unused ancestors using their cached, deterministically restricted
-        # functionals. Thus requesting a shorter prefix never changes its bets.
+    @staticmethod
+    def _check_mean(mean):
+        if not np.isfinite(mean) or not 0 < mean < 1:
+            raise ValueError("null mean must be strictly between 0 and 1")
+
+    def _regions(self, prior, mean):
+        # Cluster near the zero bet and the admissible endpoints. These
+        # boundaries depend only on the configured horizon and candidate mean.
+        fractions = np.sin(np.pi * np.arange(self.panels_per_side + 1)
+                           / (2 * self.panels_per_side))**2
+        fractions[0], fractions[-1] = 0., 1.
+        if prior == "r70":
+            regions = [(-float(fractions[1]), float(fractions[1]))]
+            for lower, upper in zip(fractions[1:-1], fractions[2:]):
+                regions.extend(((float(lower), float(upper)), (-float(upper), -float(lower))))
+            return regions
+        right = np.unique(mean + (1-mean)*fractions)
+        if mean == .5:
+            regions = []
+            for lower, upper in zip(right[:-1], right[1:]):
+                regions.extend(((float(lower), float(upper)), (float(1-upper), float(1-lower))))
+            return regions
+        left = np.unique(mean*(1-fractions[::-1]))
+        return (list(zip(map(float, right[:-1]), map(float, right[1:])))
+                + list(zip(map(float, left[:-1]), map(float, left[1:]))))
+
+    def _prepare_component(self, prior, mean):
+        regions = self._regions(prior, mean)
         length = self._tree_size
-        while length > self.leaf_size and n <= length // 2:
+        z = _nodes(length + 1)
+        root = np.empty((len(regions), 2, length + 1))
+        masses = np.empty(len(regions))
+        seen = {}
+        for j, (lower, upper) in enumerate(regions):
+            masses[j] = prior_mass(prior, lower, upper)
+            reflection = ((1-upper, 1-lower) if prior == "co96" else (-upper, -lower))
+            if reflection in seen:
+                weights = root[seen[reflection], 0, ::-1]
+            else:
+                moments = (panel_moments(prior, lower, upper, length, tol=self.moment_tol,
+                                         oversample=self.moment_oversample)
+                           if self.moment_provider is None else
+                           np.asarray(self.moment_provider(prior, lower, upper, length), dtype=float))
+                if (moments.shape != (length + 1,) or not np.all(np.isfinite(moments))
+                        or not np.isclose(moments[0], 1, rtol=0, atol=1e-12)):
+                    raise ValueError("moment_provider must return degree+1 finite normalized moments")
+                weights = _moment_weights(moments)
+            root[j, 0] = weights
+            # Compute a mean in the local coordinate z, then map it to the
+            # betting interval. This avoids subtracting nearly equal large
+            # numerator/denominator contributions on narrow regions.
+            root[j, 1] = weights*z
+            seen[lower, upper] = j
+        masses /= masses.sum()
+        initial = {length: root}
+        while length > self.leaf_size:
             length //= 2
-        weights = self._initial_weights[prior, length]
-        allocations = np.empty(n)
+            root = _region_scale(_restrict(root, length + 1))
+            initial[length] = root
+        bounds = np.asarray(regions)
+        return dict(initial=initial, masses=masses,
+                    middle=bounds.mean(axis=1), half=np.diff(bounds, axis=1)[:, 0]/2)
+
+    def prepare(self, mean):
+        """Precompute moments/rules; useful for separating setup from timing.
+
+        R70 is reusable across means. Only the most recent CO96 partition is
+        retained, so testing many candidate means does not grow memory forever.
+        """
+        self._check_mean(mean)
+        if self._r70 is None:
+            self._r70 = self._prepare_component("r70", mean)
+        if self._co96_mean != mean:
+            self._co96 = None
+            self._co96 = self._prepare_component("co96", mean)
+            self._co96_mean = float(mean)
+        return self
+
+    def _component(self, x, mean, prior, prepared):
+        middle, half = prepared["middle"], prepared["half"]
+        count = len(middle)
+        allocation = np.empty((count, len(x)))
         clipped = 0
+        length = self._tree_size
+        while length > self.leaf_size and len(x) <= length // 2:
+            length //= 2
 
         def visit(left, right, functional):
             nonlocal clipped
-            length = right - left
-            if length <= self.leaf_size:
-                # The extra node also represents the RETURNED degree-length
-                # product. Functional values use prefixes before observing x[t].
-                grid = _nodes(length + 1)
-                p = (1 + grid) / 2 if prior == "co96" else grid
-                stop = min(right, n)
-                observed = x[left:stop, None]
-                if prior == "co96":
-                    # Multiplying all returns by mean*(1-mean) leaves the
-                    # posterior unchanged and avoids large ratios near 0/1.
-                    factors = p * observed * (1 - mean) + (1 - p) * (1 - observed) * mean
+            width = right-left
+            if width <= self.leaf_size:
+                z = _nodes(width + 1)
+                coordinate = middle[:, None, None] + half[:, None, None]*z
+                stop = min(right, len(x))
+                observed = x[None, left:stop, None]
+                factors = (coordinate*observed*(1-mean) + (1-coordinate)*(1-observed)*mean
+                           if prior == "co96" else 1 + coordinate*(observed-mean))
+                factors /= factors.max(axis=-1, keepdims=True)
+                if width <= 256:
+                    products = np.concatenate((np.ones((count, 1, width+1)),
+                                               np.cumprod(factors, axis=1)), axis=1)
+                    products /= products.max(axis=-1, keepdims=True)
                 else:
-                    factors = 1 + p * (observed - mean)
-                factors /= factors.max(axis=1, keepdims=True)
-                if length <= 256:
-                    # At the central grid node each normalized linear factor
-                    # is >= 1/2; blocks of this size cannot underflow there.
-                    products = np.vstack((np.ones(length + 1), np.cumprod(factors, axis=0)))
-                    products /= products.max(axis=1, keepdims=True)
-                else:
-                    with np.errstate(divide="ignore"):
-                        log_products = np.vstack((np.zeros(length + 1), np.cumsum(np.log(factors), axis=0)))
-                    products = np.exp(log_products - log_products.max(axis=1, keepdims=True))
-                # Row t contains only observations strictly before t. No
-                # block-wide normalization using future returns is permitted.
-                integrals = products[:-1] @ functional.T
-                bad = (integrals[:, 0] <= 0) | ~np.all(np.isfinite(integrals), axis=1)
-                allocation = np.divide(integrals[:, 1], integrals[:, 0],
-                                       out=np.full(stop - left, mean if prior == "co96" else 0.0), where=~bad)
-                low, high = (0.0, 1.0) if prior == "co96" else (-1.0, 1.0)
-                clipped += int(np.sum(bad | (allocation < low) | (allocation > high)))
-                allocations[left:stop] = np.clip(allocation, low, high)
-                return products[-1] if stop == right else None
-            middle = (left + right) // 2
-            left_product = visit(left, middle, _unit_scale(_restrict(functional, middle - left + 1)))
-            if left_product is None or middle >= n:
+                    logs = np.concatenate((np.zeros((count, 1, width+1)),
+                                           np.cumsum(np.log(factors), axis=1)), axis=1)
+                    products = np.exp(logs-logs.max(axis=-1, keepdims=True))
+                integrals = products[:, :-1] @ functional.swapaxes(-1, -2)
+                bad = (integrals[:, :, 0] <= 0) | ~np.all(np.isfinite(integrals), axis=-1)
+                local = np.divide(integrals[:, :, 1], integrals[:, :, 0],
+                                  out=np.zeros((count, stop-left)), where=~bad)
+                clipped += int(np.sum(bad | (local < -1) | (local > 1)))
+                allocation[:, left:stop] = middle[:, None] + half[:, None]*np.clip(local, -1, 1)
+                return products[:, -1] if stop == right else None
+            midpoint = (left+right)//2
+            first = visit(left, midpoint, _region_scale(_restrict(functional, midpoint-left+1)))
+            if first is None or midpoint >= len(x):
                 return None
-            left_values = _resample(left_product, length + 1)
-            right_functional = _restrict(functional * left_values, right - middle + 1)
-            right_product = visit(middle, right, _unit_scale(right_functional))
-            if right_product is None:
+            values = _resample(first, width+1)
+            second = visit(midpoint, right, _region_scale(
+                _restrict(functional*values[:, None, :], right-midpoint+1)))
+            if second is None:
                 return None
-            return _unit_scale(left_values * _resample(right_product, length + 1))
+            return _region_scale(values*_resample(second, width+1))
 
-        visit(0, length, weights)
-        return allocations, clipped
+        visit(0, length, prepared["initial"][length])
+        if prior == "co96":
+            with np.errstate(divide="ignore"):
+                increments = np.logaddexp(np.log(allocation)+np.log(x)-np.log(mean),
+                                         np.log1p(-allocation)+np.log1p(-x)-np.log1p(-mean))
+        else:
+            increments = np.log1p(allocation*(x-mean))
+        # Hedge the actual regional strategies. Only their PAST wealth enters
+        # the allocation for the next observation; there is no retrospective
+        # replacement of capital by a recomputed mixture value.
+        logs = np.cumsum(increments, axis=1)
+        previous = np.column_stack((np.zeros(count), logs[:, :-1]))
+        previous += np.log(prepared["masses"])[:, None]
+        weights = np.exp(previous-previous.max(axis=0))
+        combined = np.sum(weights*allocation, axis=0)/weights.sum(axis=0)
+        return np.clip(combined, 0 if prior == "co96" else -1, 1), clipped
 
     def wealth(self, x, mean):
-        """All prefix log wealths, with time-zero wealth 1 implicit.
-
-        Component allocations are projected to their admissible intervals.
-        Accumulating their actual returns avoids thresholding a possibly
-        inaccurate signed quadrature sum. Hedge the two WEALTHS, not bounds.
-        """
         x = _data(x)
         if len(x) > self.horizon:
             raise ValueError("data exceed the configured horizon")
-        if not np.isfinite(mean) or not 0 < mean < 1:
-            raise ValueError("null mean must be strictly between 0 and 1")
-        p, clipped_co96 = self._allocations(x, mean, "co96")
-        beta, clipped_r = self._allocations(x, mean, "r70")
-        with np.errstate(divide="ignore"):
-            log_co96 = np.cumsum(np.logaddexp(np.log(p) + np.log(x) - np.log(mean),
-                                          np.log1p(-p) + np.log1p(-x) - np.log1p(-mean)))
-            log_r = np.cumsum(np.log1p(beta * (x - mean)))
-        return WealthResult(np.logaddexp(log_co96, log_r) - np.log(2), log_co96, log_r,
-                            p, beta, clipped_co96 + clipped_r)
+        self._check_mean(mean)
+        if len(x) == 0:
+            return WealthResult(*(np.empty(0) for _ in range(5)), 0)
+        self.prepare(mean)
+        p, clipped_co = self._component(x, mean, "co96", self._co96)
+        beta, clipped_r = self._component(x, mean, "r70", self._r70)
+        co96, r70, total = self._log_returns(x, mean, p, beta)
+        return WealthResult(total, co96, r70, p, beta, clipped_co+clipped_r,
+                            len(self._co96["masses"]), len(self._r70["masses"]))
 
 
     def test(self, x, mu0, alpha=0.05):
-        """Test E[X] = mu0 against E[X] != mu0, reusing the stored moments.
+        """Test E[X] = mu0 against E[X] != mu0, reusing continuous-prior moment rules.
 
         stopping_time is the first crossing (one-based), or None if no
         crossing was observed. Later declines in wealth do not undo rejection.
@@ -336,15 +325,22 @@ class FFTPortfolio:
                               np.exp(-running_log_wealth),
                               int(crossings[0]) + 1 if len(crossings) else None)
 
+    @staticmethod
+    def _log_returns(x, mean, p, beta):
+        with np.errstate(divide="ignore"):
+            co96 = np.cumsum(np.logaddexp(np.log(p) + np.log(x) - np.log(mean),
+                                         np.log1p(-p) + np.log1p(-x) - np.log1p(-mean)))
+            r70 = np.cumsum(np.log1p(beta * (x - mean)))
+        return co96, r70, np.logaddexp(co96, r70) - np.log(2)
 
-def betting_mean_test(x, mu0, alpha=0.05, *, leaf_size=64, moment_tol=1e-13):
-    """Run OPT-FFT for a specified interior null mean and observations in [0, 1].
 
-    This batch interface returns all prefix wealths, anytime p-values, and
-    the first rejection time. For repeated tests, reuse FFTPortfolio.test.
-    """
+def betting_mean_test(x, mu0, alpha=0.05, *, panels_per_side=None, leaf_size=32,
+                      moment_tol=1e-13, moment_oversample=1.0, moment_provider=None):
+    """Run the continuous-prior regional FFT test for one candidate mean."""
     x = _data(x)
-    return FFTPortfolio(len(x), leaf_size=leaf_size, moment_tol=moment_tol).test(x, mu0, alpha)
+    return FFTPortfolio(len(x), panels_per_side=panels_per_side, leaf_size=leaf_size,
+                        moment_tol=moment_tol, moment_oversample=moment_oversample,
+                        moment_provider=moment_provider).test(x, mu0, alpha)
 
 
 def main():
@@ -352,14 +348,21 @@ def main():
     parser.add_argument("input", type=Path, help="one-column CSV/text file, or .npy array")
     parser.add_argument("--mu0", type=float, required=True, help="null mean, strictly between 0 and 1")
     parser.add_argument("--alpha", type=float, default=0.05, help="type-I error level")
+    parser.add_argument("--panels-per-side", type=int, default=None,
+                        help="spatial partition size; default grows polylogarithmically with the horizon")
+    parser.add_argument("--leaf-size", type=int, default=32, help="direct recursion leaf size")
     parser.add_argument("--moment-tol", type=float, default=1e-13,
-                        help="absolute moment approximation tolerance (default: 1e-13)")
+                        help="numerical moment accuracy target; not a wealth-error bound")
+    parser.add_argument("--moment-oversample", type=float, default=1.,
+                        help="increase moment quadrature order for refinement checks")
     parser.add_argument("--output", type=Path, default=Path("mean_test.csv"))
     args = parser.parse_args()
     x = np.load(args.input) if args.input.suffix == ".npy" else np.loadtxt(args.input, delimiter=",")
     x = np.atleast_1d(x)
     try:
-        result = betting_mean_test(x, args.mu0, args.alpha, moment_tol=args.moment_tol)
+        result = betting_mean_test(x, args.mu0, args.alpha, panels_per_side=args.panels_per_side,
+                                   leaf_size=args.leaf_size, moment_tol=args.moment_tol,
+                                   moment_oversample=args.moment_oversample)
     except ValueError as error:
         parser.error(str(error))
     times = np.arange(1, len(x) + 1)

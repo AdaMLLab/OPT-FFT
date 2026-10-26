@@ -7,8 +7,8 @@
   "distribution": "Bernoulli",
   "mu0": 0.5,
   "alpha": 0.05,
-  "horizon": 10000,
-  "trials": 100,
+  "horizon": 2048,
+  "trials": 5,
   "gaps": [
     0.2,
     0.1,
@@ -20,7 +20,14 @@
     0.5,
     0.5
   ],
-  "moment_setup_seconds": 0.03861050901468843,
+  "setup_seconds": 0.6989628819865175,
+  "implementation": "regional_fft",
+  "numerics": {
+    "panels_per_side": 128,
+    "leaf_size": 32,
+    "moment_tol": 1e-13,
+    "moment_oversample": 1.0
+  },
   "trace_statistic": "sample mean of log wealth over all trials at each time, continuing after rejection",
   "trace_uncertainty": "pointwise standard error across trials; zero placeholder for a single trial",
   "time_statistic": "sample mean of min(stopping time, horizon); unrejected trials are censored",
@@ -35,72 +42,72 @@
       "true_mean": 0.7,
       "gap": 0.2,
       "side": "above",
-      "rejections": 100,
-      "trials": 100,
+      "rejections": 5,
+      "trials": 5,
       "rejection_rate": 1.0,
       "censored_trials": 0,
-      "mean_capped_time": 60.29,
-      "se_capped_time": 3.652100405757949,
+      "mean_capped_time": 78.0,
+      "se_capped_time": 29.206163733020464,
       "trace_file": "trace_gap_0.2_above.csv",
-      "test_seconds": 6.943489183031488,
+      "test_seconds": 4.9562861830345355,
       "clipped_allocations_in_full_traces": 0,
       "validation": {
         "observations": 256,
-        "max_log_wealth_error": 3.907985046680551e-14
+        "max_log_wealth_error": 1.7763568394002505e-14
       }
     },
     {
       "true_mean": 0.6,
       "gap": 0.1,
       "side": "above",
-      "rejections": 100,
-      "trials": 100,
+      "rejections": 5,
+      "trials": 5,
       "rejection_rate": 1.0,
       "censored_trials": 0,
-      "mean_capped_time": 313.79,
-      "se_capped_time": 18.86818333661835,
+      "mean_capped_time": 339.2,
+      "se_capped_time": 106.75410999113804,
       "trace_file": "trace_gap_0.1_above.csv",
-      "test_seconds": 6.878863709978759,
+      "test_seconds": 4.899440538021736,
       "clipped_allocations_in_full_traces": 0,
       "validation": {
         "observations": 256,
-        "max_log_wealth_error": 1.554312234475219e-14
+        "max_log_wealth_error": 7.327471962526033e-15
       }
     },
     {
       "true_mean": 0.55,
       "gap": 0.05,
       "side": "above",
-      "rejections": 100,
-      "trials": 100,
-      "rejection_rate": 1.0,
-      "censored_trials": 0,
-      "mean_capped_time": 1182.08,
-      "se_capped_time": 76.94217910387336,
+      "rejections": 2,
+      "trials": 5,
+      "rejection_rate": 0.4,
+      "censored_trials": 3,
+      "mean_capped_time": 1452.2,
+      "se_capped_time": 367.24956092553737,
       "trace_file": "trace_gap_0.05_above.csv",
-      "test_seconds": 6.891724282002542,
+      "test_seconds": 4.862927189969923,
       "clipped_allocations_in_full_traces": 0,
       "validation": {
         "observations": 256,
-        "max_log_wealth_error": 4.218847493575595e-15
+        "max_log_wealth_error": 1.7763568394002505e-15
       }
     },
     {
       "true_mean": 0.525,
       "gap": 0.025,
       "side": "above",
-      "rejections": 92,
-      "trials": 100,
-      "rejection_rate": 0.92,
-      "censored_trials": 8,
-      "mean_capped_time": 4714.16,
-      "se_capped_time": 289.86131540041106,
+      "rejections": 1,
+      "trials": 5,
+      "rejection_rate": 0.2,
+      "censored_trials": 4,
+      "mean_capped_time": 2004.8,
+      "se_capped_time": 43.2,
       "trace_file": "trace_gap_0.025_above.csv",
-      "test_seconds": 6.877471068000887,
+      "test_seconds": 4.808409003017005,
       "clipped_allocations_in_full_traces": 0,
       "validation": {
         "observations": 256,
-        "max_log_wealth_error": 3.1086244689504383e-15
+        "max_log_wealth_error": 2.7755575615628914e-15
       }
     }
   ]
